@@ -18,7 +18,7 @@ log = logging.getLogger("bot")
 # ==========================================================
 # CONFIG
 # ==========================================================
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8913407701:AAERppuGL2DGi0CKJri7NOjjCgAhlgHKEBU")
+BOT_TOKEN = os.getenv("BOT_TOKEN"8972477356:AAH3X0Bvryp7fDbwkQtJrRV926KvQhiC-m8")
 PORT = int(os.getenv("PORT", "8080"))
 DB_FILE = os.getenv("DB_FILE", "bot.db")
 ADMIN_IDS = [int(x.strip()) for x in os.getenv("ADMIN_IDS", "8094164308").split(",") if x.strip().isdigit()]
