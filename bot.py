@@ -1,5 +1,5 @@
 # main.py — Gmail Sell Bot (Polling + Force Join + SQLite)
-# পার্ট ১/৫ : Config + Database
+# পার্ট ১/৬ : Config + Database
 
 import asyncio, json, logging, os, re, sqlite3
 from datetime import datetime
@@ -21,7 +21,7 @@ log = logging.getLogger("bot")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8972477356:AAH3X0Bvryp7fDbwkQtJrRV926KvQhiC-m8")
 PORT = int(os.getenv("PORT", "8080"))
 DB_FILE = os.getenv("DB_FILE", "bot.db")
-ADMIN_IDS = [int(x.strip()) for x in os.getenv("ADMIN_IDS", "8094164308").split(",") if x.strip().isdigit()]
+ADMIN_IDS = [int(x.strip()) for x in os.getenv("ADMIN_IDS", "8912369619").split(",") if x.strip().isdigit()]
 
 DEFAULT_SETTINGS = {
     "bot_username": "gmailsells_bot",
@@ -179,11 +179,14 @@ class DB:
         ch = ch.lower().lstrip("@").strip()
         if not ch:
             return False
-        self.conn.execute(
-            "INSERT OR IGNORE INTO force_channels (channel,added_at) VALUES (?,?)",
-            (ch, datetime.now().isoformat()))
-        self.conn.commit()
-        return True
+        try:
+            self.conn.execute(
+                "INSERT INTO force_channels (channel,added_at) VALUES (?,?)",
+                (ch, datetime.now().isoformat()))
+            self.conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            return False
 
     def del_channel(self, ch):
         self.conn.execute(
@@ -193,7 +196,8 @@ class DB:
 
     def channels(self):
         return [r["channel"] for r in
-                self.conn.execute("SELECT channel FROM force_channels ORDER BY added_at").fetchall()]
+                self.conn.execute(
+                    "SELECT channel FROM force_channels ORDER BY added_at").fetchall()]
 
     def force_join_on(self):
         return self.get("force_join", "0") == "1"
@@ -280,10 +284,6 @@ class DB:
         self.conn.execute("DELETE FROM categories WHERE key=?", (key,))
         self.conn.commit()
 
-    def set_cat_rate(self, key, rate):
-        self.conn.execute("UPDATE categories SET rate=? WHERE key=?", (rate, key))
-        self.conn.commit()
-
     # ---------- stock ----------
     def add_stock(self, gmail, pwd, cat="old"):
         try:
@@ -315,7 +315,7 @@ class DB:
         self.conn.commit()
         return c
 
-    # ---------- duplicate check ----------
+    # ---------- duplicate ----------
     def used(self, gmail):
         g = gmail.lower().strip()
         if self.conn.execute("SELECT 1 FROM used WHERE gmail=?", (g,)).fetchone():
@@ -461,12 +461,6 @@ class DB:
         return [r["user_id"] for r in
                 self.conn.execute("SELECT user_id FROM users").fetchall()]
 
-    def find_uname(self, uname):
-        r = self.conn.execute(
-            "SELECT user_id FROM users WHERE LOWER(username)=LOWER(?)",
-            (uname.lstrip("@").strip(),)).fetchone()
-        return r["user_id"] if r else None
-
     def top_refs(self, limit=20):
         return [dict(r) for r in
                 self.conn.execute(
@@ -482,7 +476,7 @@ class DB:
 
 db = DB(DB_FILE)
 # ==========================================================
-# পার্ট ২/৫ : Helpers + Keyboards + Telegram Utilities
+# পার্ট ২/৬ : Helpers + Keyboards + Force Join Check
 # ==========================================================
 
 GMAIL_RE = re.compile(r"^[a-zA-Z0-9._%+\-]+@gmail\.com$", re.IGNORECASE)
@@ -554,6 +548,28 @@ router = Router()
 
 
 # ==========================================================
+# FORCE JOIN CHECK
+# ==========================================================
+
+async def user_in_channel(uid: int, channel: str) -> bool:
+    try:
+        member = await bot.get_chat_member(
+            chat_id=f"@{channel.lstrip('@')}", user_id=uid)
+        return member.status not in ("left", "kicked")
+    except Exception as e:
+        log.warning(f"channel check failed @{channel}: {e}")
+        return True
+
+
+async def check_all_channels(uid: int):
+    missing = []
+    for ch in db.channels():
+        if not await user_in_channel(uid, ch):
+            missing.append(ch)
+    return missing
+
+
+# ==========================================================
 # KEYBOARDS
 # ==========================================================
 
@@ -592,11 +608,7 @@ def kb_support():
     return b.as_markup()
 
 
-# ---------- FORCE JOIN KEYBOARD ----------
 def kb_force_join(missing_channels):
-    """
-    missing_channels: লিস্ট — যেসব চ্যানেলে ইউজার এখনো join করেনি।
-    """
     b = InlineKeyboardBuilder()
     for ch in missing_channels:
         b.row(InlineKeyboardButton(
@@ -611,7 +623,6 @@ def kb_force_join(missing_channels):
 
 
 def kb_categories_for_submit():
-    """'Old Gmail জমা দিন' এ ক্লিক করার পর ক্যাটাগরি লিস্ট।"""
     cats = db.cats()
     b = InlineKeyboardBuilder()
     if not cats:
@@ -695,7 +706,6 @@ def kb_admin_cat_del_confirm(key):
     return b.as_markup()
 
 
-# ---------- FORCE JOIN CHANNEL MANAGEMENT ----------
 def kb_admin_force_menu():
     b = InlineKeyboardBuilder()
     chs = db.channels()
@@ -900,32 +910,8 @@ async def send_chunked(chat, header, lines, markup=None):
             await bot.send_message(**payload)
         except Exception as e:
             log.warning(f"chunked fail: {e}")
-
-
 # ==========================================================
-# FORCE JOIN CHECK
-# ==========================================================
-
-async def user_in_channel(uid: int, channel: str) -> bool:
-    try:
-        member = await bot.get_chat_member(
-            chat_id=f"@{channel.lstrip('@')}", user_id=uid)
-        return member.status not in ("left", "kicked")
-    except Exception as e:
-        log.warning(f"channel check failed @{channel}: {e}")
-        # চেক করতে ব্যর্থ হলে ব্লক না করে পার হওয়াই ভালো
-        return True
-
-
-async def check_all_channels(uid: int):
-    """সব চ্যানেল চেক করে যেগুলোতে নেই সেগুলোর লিস্ট দেয়।"""
-    missing = []
-    for ch in db.channels():
-        if not await user_in_channel(uid, ch):
-            missing.append(ch)
-    return missing
-# ==========================================================
-# পার্ট ৩/৫ : User Handlers + Force Join
+# পার্ট ৩/৬ : /start (Referral Fix) + User Commands
 # ==========================================================
 
 @router.message(CommandStart())
@@ -947,10 +933,21 @@ async def cmd_start(m: Message):
         await m.answer("🚧 বট রক্ষণাবেক্ষণে আছে। পরে চেষ্টা করুন।")
         return
 
-    # ---------- FORCE JOIN CHECK ----------
+    # ---------- ১. Referrer আইডি মনে রাখা ----------
+    parts = (m.text or "").split(maxsplit=1)
+    pending_ref = None
+    if len(parts) > 1 and parts[1].strip().isdigit():
+        ref = int(parts[1].strip())
+        if ref != uid and db.user(ref):
+            pending_ref = ref
+
+    # ---------- ২. Force Join চেক ----------
     if force_join_on() and not db.is_admin(uid):
         missing = await check_all_channels(uid)
         if missing:
+            # referrer আইডি state-এ সেভ করে রাখি
+            if pending_ref:
+                db.set_state(uid, f"pending_ref_{pending_ref}")
             ch_list = "\n".join(f"• @{ch}" for ch in missing)
             await m.answer(
                 f"📢 **প্রথমে আমাদের চ্যানেলে যোগ দিন!**\n\n"
@@ -960,24 +957,24 @@ async def cmd_start(m: Message):
                 reply_markup=kb_force_join(missing))
             return
 
-    # ---------- REFERRAL ----------
-    parts = (m.text or "").split(maxsplit=1)
-    if len(parts) > 1 and parts[1].strip().isdigit():
-        ref = int(parts[1].strip())
+    # ---------- ৩. Referral প্রসেস ----------
+    if pending_ref:
         row = db.user(uid)
-        if row and row["is_new"] and ref != uid and db.user(ref):
-            db.add_referral(ref, uid)
+        if row and row["is_new"]:
+            db.add_referral(pending_ref, uid)
             try:
                 await bot.send_message(
-                    ref,
+                    pending_ref,
                     f"🎉 আপনার রেফার লিংক দিয়ে কেউ জয়েন করেছে!\n"
                     f"সে কাজ সম্পন্ন করলে আপনি {refer_pct()}% কমিশন পাবেন।")
             except Exception:
                 pass
         else:
             db.set_not_new(uid)
+    else:
+        db.set_not_new(uid)
 
-    # ---------- WELCOME ----------
+    # ---------- ৪. Welcome ----------
     await m.answer(
         f"{welcome()}\n\n"
         f"♻️ Old Gmail জমা দিয়ে আয় করুন\n"
@@ -987,7 +984,10 @@ async def cmd_start(m: Message):
         reply_markup=kb_main(db.is_admin(uid)))
 
 
-# ---------- FORCE JOIN "যোগ দিয়েছি" বাটন ----------
+# ==========================================================
+# FORCE JOIN "যোগ দিয়েছি" বাটন — Referral Fix সহ
+# ==========================================================
+
 @router.callback_query(F.data == "check_join")
 async def cb_check_join(cb: CallbackQuery):
     uid = cb.from_user.id
@@ -1003,6 +1003,32 @@ async def cb_check_join(cb: CallbackQuery):
         return
 
     await answer(cb, "✅ ধন্যবাদ! এখন বট ব্যবহার করতে পারবেন।", alert=True)
+
+    # ---------- pending referrer চেক ----------
+    state = db.state(uid)
+    pending_ref = None
+    if state.startswith("pending_ref_"):
+        try:
+            pending_ref = int(state.replace("pending_ref_", "", 1))
+        except ValueError:
+            pending_ref = None
+    db.set_state(uid, "")
+
+    # ---------- referral প্রসেস ----------
+    if pending_ref:
+        row = db.user(uid)
+        if row and row["is_new"]:
+            db.add_referral(pending_ref, uid)
+            try:
+                await bot.send_message(
+                    pending_ref,
+                    f"🎉 আপনার রেফার লিংক দিয়ে কেউ জয়েন করেছে!\n"
+                    f"সে কাজ সম্পন্ন করলে আপনি {refer_pct()}% কমিশন পাবেন।")
+            except Exception:
+                pass
+        else:
+            db.set_not_new(uid)
+
     try:
         await cb.message.delete()
     except Exception:
@@ -1012,7 +1038,10 @@ async def cb_check_join(cb: CallbackQuery):
         reply_markup=kb_main(db.is_admin(uid)))
 
 
-# ---------- MAIN MENU ----------
+# ==========================================================
+# MAIN MENU
+# ==========================================================
+
 @router.callback_query(F.data == "main_menu")
 async def cb_main_menu(cb: CallbackQuery):
     uid = cb.from_user.id
@@ -1031,7 +1060,10 @@ async def cb_noop(cb: CallbackQuery):
     await answer(cb)
 
 
-# ---------- PROFILE ----------
+# ==========================================================
+# PROFILE
+# ==========================================================
+
 @router.callback_query(F.data == "profile")
 async def cb_profile(cb: CallbackQuery):
     uid = cb.from_user.id
@@ -1054,7 +1086,10 @@ async def cb_profile(cb: CallbackQuery):
         reply_markup=kb_back())
 
 
-# ---------- REFER ----------
+# ==========================================================
+# REFER
+# ==========================================================
+
 @router.callback_query(F.data == "refer")
 async def cb_refer(cb: CallbackQuery):
     uid = cb.from_user.id
@@ -1072,7 +1107,10 @@ async def cb_refer(cb: CallbackQuery):
         reply_markup=kb_back())
 
 
-# ---------- SUPPORT ----------
+# ==========================================================
+# SUPPORT
+# ==========================================================
+
 @router.callback_query(F.data == "support")
 async def cb_support(cb: CallbackQuery):
     await answer(cb)
@@ -1081,7 +1119,10 @@ async def cb_support(cb: CallbackQuery):
                reply_markup=kb_support())
 
 
-# ---------- STATS ----------
+# ==========================================================
+# STATS
+# ==========================================================
+
 @router.callback_query(F.data == "stats")
 async def cb_stats(cb: CallbackQuery):
     await answer(cb)
@@ -1091,10 +1132,12 @@ async def cb_stats(cb: CallbackQuery):
         f"📦 স্টকে জিমেইল: `{db.stock_count()}` টি\n"
         f"🗂️ ক্যাটাগরি: `{len(db.cats())}` টি",
         reply_markup=kb_back())
-
+# ==========================================================
+# পার্ট ৪/৬ : Submit + Withdraw
+# ==========================================================
 
 # ==========================================================
-# SUBMIT — ক্যাটাগরি → মাস্টার পাসওয়ার্ড + রিকভারি → Gmail
+# OLD GMAIL SUBMIT
 # ==========================================================
 
 @router.callback_query(F.data == "submit")
@@ -1326,7 +1369,7 @@ async def handle_wallet_number(m: Message):
         f"অ্যাডমিন টাকা পাঠানোর পর আপনাকে জানানো হবে।",
         reply_markup=kb_back())
 # ==========================================================
-# পার্ট ৪-ক : Admin Panel + Bot Username + Stock
+# পার্ট ৫-ক/৬ : Admin Panel + Stock + Category + Force Join
 # ==========================================================
 
 def is_admin_cb(cb) -> bool:
@@ -1362,12 +1405,12 @@ async def cb_bot_uname(cb: CallbackQuery):
         cb,
         f"🤖 **বট Username সেট করুন**\n\n"
         f"বর্তমান: `@{esc(bot_username())}`\n\n"
-        f"ℹ️ এটা referral লিংকের জন্য দরকার।\n"
-        f"নতুন username লিখে পাঠান (@ ছাড়া)।\n\n"
+        f"নতুন username লিখে পাঠান (@ ছাড়া)।\n"
         f"উদাহরণ: `TrustVaultMailsBot`",
         reply_markup=kb_cancel("admin"))
 
 
+# ---------- STOCK ----------
 @router.callback_query(F.data == "a_stock_add")
 async def cb_stock_add(cb: CallbackQuery):
     if not is_admin_cb(cb): return
@@ -1439,14 +1482,9 @@ async def cb_stock_clear_ok(cb: CallbackQuery):
     await edit(cb,
                f"🧹 সম্পূর্ণ স্টক ক্লিয়ার! (`{n}` টি মুছে ফেলা হয়েছে)",
                reply_markup=kb_back("admin", "🔙 অ্যাডমিন"))
-# ==========================================================
-# পার্ট ৪-খ : Category + Force Join + Password + Balance
-# ==========================================================
 
-# ==========================================================
-# CATEGORY MANAGEMENT
-# ==========================================================
 
+# ---------- CATEGORY ----------
 @router.callback_query(F.data == "a_cat_menu")
 async def cb_cat_menu(cb: CallbackQuery):
     if not is_admin_cb(cb): return
@@ -1500,10 +1538,7 @@ async def cb_cat_del(cb: CallbackQuery):
         reply_markup=kb_admin_cat_del_confirm(key))
 
 
-# ==========================================================
-# FORCE JOIN MANAGEMENT
-# ==========================================================
-
+# ---------- FORCE JOIN ----------
 @router.callback_query(F.data == "a_force_menu")
 async def cb_force_menu(cb: CallbackQuery):
     if not is_admin_cb(cb): return
@@ -1573,10 +1608,12 @@ async def cb_force_del(cb: CallbackQuery):
         cb,
         f"⚠️ @{esc(ch)} বাদ দেবেন?",
         reply_markup=kb_admin_force_del_confirm(ch))
-
+# ==========================================================
+# পার্ট ৫-খ/৬ : Password + Limits + Balance + History
+# ==========================================================
 
 # ==========================================================
-# MASTER PASSWORD + RECOVERY EMAIL
+# MASTER PASSWORD + RECOVERY
 # ==========================================================
 
 @router.callback_query(F.data == "a_master_pw")
@@ -1874,8 +1911,10 @@ async def cb_maint(cb: CallbackQuery):
     await edit(cb,
                f"মেইনটেন্যান্স মোড এখন **{status}**।",
                reply_markup=kb_back("admin", "🔙 অ্যাডমিন"))
+
+
 # ==========================================================
-# পার্ট ৪-গ : Backup + History + Top + Broadcast
+# BACKUP / HISTORY / TOP / BROADCAST
 # ==========================================================
 
 @router.callback_query(F.data == "a_backup")
@@ -1889,10 +1928,9 @@ async def cb_backup(cb: CallbackQuery):
         await bot.send_document(
             cb.from_user.id,
             BufferedInputFile(data, filename=fname),
-            caption=f"💾 ডাটাবেস ব্যাকআপ — {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-        )
+            caption=f"💾 ডাটাবেস ব্যাকআপ")
     except Exception as e:
-        await bot.send_message(cb.from_user.id, f"❌ ব্যাকআপ ব্যর্থ: {e}")
+        await bot.send_message(cb.from_user.id, f"❌ ব্যর্থ: {e}")
 
 
 @router.callback_query(F.data == "a_ghist")
@@ -1910,7 +1948,7 @@ async def cb_ghist(cb: CallbackQuery):
         lines.append(
             f"{icon} #{x['task_id']} — {x['status'].capitalize()}\n"
             f"👤 {esc(x['username'])}\n"
-            f"?? `{esc(x['gmail'])}`\n"
+            f"📨 `{esc(x['gmail'])}`\n"
             f"🗂️ {esc(x.get('category', '') or 'old')}\n"
             f"👑 {esc(x['admin'])}\n"
             f"🕐 {x['timestamp'][:19]}")
@@ -1977,7 +2015,7 @@ async def cb_bc(cb: CallbackQuery):
         "টেক্সট, ছবি, ভিডিও — যেকোনো কিছু পাঠাতে পারেন।",
         reply_markup=kb_cancel("admin"))
 # ==========================================================
-# পার্ট ৫A/৫ : Job Accept/Reject + Withdraw Paid/Reject
+# পার্ট ৬-ক/৬ : Job Accept/Reject + Withdraw Paid/Reject
 # ==========================================================
 
 @router.callback_query(F.data.startswith("aj_"))
@@ -2236,7 +2274,7 @@ async def cb_reject_wd(cb: CallbackQuery):
         except Exception:
             pass
 # ==========================================================
-# পার্ট ৫B/৫ : Admin Text Input + Fallback + main()
+# পার্ট ৬-খ/৬ : Admin Text Input + Fallback + main()
 # ==========================================================
 
 @router.message(F.text, lambda m: db.is_admin(m.from_user.id) and db.state(m.from_user.id).startswith("a_w_"))
@@ -2254,8 +2292,7 @@ async def dispatch_admin_input(m: Message):
             return
         db.set("bot_username", clean)
         await m.answer(
-            f"✅ বট username সেট হয়েছে: `@{esc(clean)}`\n\n"
-            f"referral লিংক এখন:\n`https://t.me/{esc(clean)}?start=<your_id>`",
+            f"✅ বট username সেট হয়েছে: `@{esc(clean)}`",
             reply_markup=kb_back("admin", "🔙 অ্যাডমিন"))
         return
 
@@ -2322,8 +2359,7 @@ async def dispatch_admin_input(m: Message):
         key = f"cat{i}"
         db.add_cat(key, label, rate)
         await m.answer(
-            f"✅ নতুন ক্যাটাগরি যোগ হয়েছে!\n\n"
-            f"**{esc(label)}** — `{rate}` টাকা",
+            f"✅ নতুন ক্যাটাগরি যোগ হয়েছে!\n\n**{esc(label)}** — `{rate}` টাকা",
             reply_markup=kb_back("a_cat_menu", "🔙 ক্যাটাগরি মেনু"))
         return
 
@@ -2336,22 +2372,20 @@ async def dispatch_admin_input(m: Message):
             return
         ok = db.add_channel(clean)
         if not ok:
-            await m.answer("⚠️ এই চ্যানেল ইতিমধ্যে যোগ করা আছে বা ভুল ফরম্যাট।",
+            await m.answer("⚠️ এই চ্যানেল ইতিমধ্যে যোগ করা আছে।",
                            reply_markup=kb_back("a_force_menu", "🔙 Force Join"))
             return
         try:
             chat = await bot.get_chat(f"@{clean}")
             chat_title = chat.title or clean
         except Exception:
-            chat_title = clean
             await m.answer(
-                f"⚠️ @{esc(clean)} যোগ করা হয়েছে, কিন্তু চেক করতে পারিনি।\n"
-                f"নিশ্চিত করুন — চ্যানেল Public এবং বট Admin আছে কি না।",
+                f"⚠️ @{esc(clean)} যোগ করা হয়েছে, কিন্তু বট verify করতে পারিনি।\n"
+                f"নিশ্চিত করুন — চ্যানেল Public এবং বট Admin আছে।",
                 reply_markup=kb_back("a_force_menu", "🔙 Force Join"))
             return
         await m.answer(
-            f"✅ নতুন চ্যানেল যোগ হয়েছে!\n\n"
-            f"📢 **{esc(chat_title)}** (@{esc(clean)})",
+            f"✅ নতুন চ্যানেল যোগ হয়েছে!\n\n📢 **{esc(chat_title)}** (@{esc(clean)})",
             reply_markup=kb_back("a_force_menu", "🔙 Force Join"))
         return
 
@@ -2375,9 +2409,8 @@ async def dispatch_admin_input(m: Message):
                            reply_markup=kb_cancel("admin"))
             return
         db.set("recovery_email", text)
-        await m.answer(
-            f"✅ ডিফল্ট রিকভারি: `{esc(text)}`",
-            reply_markup=kb_back("admin", "🔙 অ্যাডমিন"))
+        await m.answer(f"✅ ডিফল্ট রিকভারি: `{esc(text)}`",
+                       reply_markup=kb_back("admin", "🔙 অ্যাডমিন"))
         return
 
     # ---------- 8. LIMITS ----------
@@ -2391,24 +2424,15 @@ async def dispatch_admin_input(m: Message):
             await m.answer("⚠️ সঠিক সংখ্যা দিন।")
             return
         db.set_state(uid, "")
-        smap = {
-            "gmail": "min_wd_gmail",
-            "refer": "min_wd_refer",
-            "charge": "refer_charge",
-            "minrefs": "min_refers",
-        }
-        labels = {
-            "gmail": "জিমেইল মিনিমাম",
-            "refer": "রেফার মিনিমাম",
-            "charge": "রেফার চার্জ",
-            "minrefs": "ন্যূনতম রেফার",
-        }
+        smap = {"gmail": "min_wd_gmail", "refer": "min_wd_refer",
+                "charge": "refer_charge", "minrefs": "min_refers"}
+        labels = {"gmail": "জিমেইল মিনিমাম", "refer": "রেফার মিনিমাম",
+                  "charge": "রেফার চার্জ", "minrefs": "ন্যূনতম রেফার"}
         if key not in smap:
             return
         db.set(smap[key], val)
-        await m.answer(
-            f"✅ {labels[key]} **{val}** সেট হয়েছে।",
-            reply_markup=kb_back("a_limits", "🔙 লিমিট"))
+        await m.answer(f"✅ {labels[key]} **{val}** সেট হয়েছে।",
+                       reply_markup=kb_back("a_limits", "🔙 লিমিট"))
         return
 
     # ---------- 9. METHOD CHARGE ----------
@@ -2423,9 +2447,8 @@ async def dispatch_admin_input(m: Message):
             return
         db.set_state(uid, "")
         set_method_charge(m_key, val)
-        await m.answer(
-            f"✅ {m_key} চার্জ **{val} টাকা** সেট।",
-            reply_markup=kb_back("a_mcharges", "🔙 চার্জ মেনু"))
+        await m.answer(f"✅ {m_key} চার্জ **{val} টাকা** সেট।",
+                       reply_markup=kb_back("a_mcharges", "🔙 চার্জ"))
         return
 
     # ---------- 10. WARNING LIMIT ----------
@@ -2439,9 +2462,8 @@ async def dispatch_admin_input(m: Message):
             return
         db.set_state(uid, "")
         db.set("warning_limit", val)
-        await m.answer(
-            f"✅ ওয়ার্নিং লিমিট: **{val}**",
-            reply_markup=kb_back("admin", "🔙 অ্যাডমিন"))
+        await m.answer(f"✅ ওয়ার্নিং লিমিট: **{val}**",
+                       reply_markup=kb_back("admin", "🔙 অ্যাডমিন"))
         return
 
     # ---------- 11. BAN ----------
@@ -2576,8 +2598,7 @@ async def dispatch_admin_input(m: Message):
         await m.answer(f"✅ `{target}` অ্যাডমিন হয়েছে।",
                        reply_markup=kb_back("admin", "🔙 অ্যাডমিন"))
         try:
-            await bot.send_message(target,
-                "🎉 আপনাকে অ্যাডমিন করা হয়েছে! /start দিন।")
+            await bot.send_message(target, "🎉 আপনাকে অ্যাডমিন করা হয়েছে!")
         except Exception:
             pass
         return
@@ -2628,9 +2649,7 @@ async def dispatch_admin_input(m: Message):
         for u in db.all_uids():
             try:
                 await bot.copy_message(
-                    chat_id=u,
-                    from_chat_id=uid,
-                    message_id=m.message_id)
+                    chat_id=u, from_chat_id=uid, message_id=m.message_id)
                 ok += 1
             except Exception:
                 pass
